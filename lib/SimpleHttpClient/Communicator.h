@@ -17,9 +17,34 @@
 ///
 /// Copyright holder is ArangoDB GmbH, Cologne, Germany
 ///
+/// Asio code based on https://curl.haxx.se/libcurl/c/asiohiper.html
+///
+/// License below
+///
 /// @author Andreas Streichardt
 /// @author Frank Celler
 ////////////////////////////////////////////////////////////////////////////////
+/***************************************************************************
+ *                                  _   _ ____  _
+ *  Project                     ___| | | |  _ \| |
+ *                             / __| | | | |_) | |
+ *                            | (__| |_| |  _ <| |___
+ *                             \___|\___/|_| \_\_____|
+ *
+ * Copyright (C) 2012 - 2017, Daniel Stenberg, <daniel@haxx.se>, et al.
+ *
+ * This software is licensed as described in the file COPYING, which
+ * you should have received as part of this distribution. The terms
+ * are also available at https://curl.haxx.se/docs/copyright.html.
+ *
+ * You may opt to use, copy, modify, merge, publish, distribute and/or sell
+ * copies of the Software, and permit persons to whom the Software is
+ * furnished to do so, under the terms of the COPYING file.
+ *
+ * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
+ * KIND, either express or implied.
+ *
+ ***************************************************************************/ 
 
 #ifndef ARANGODB_SIMPLE_HTTP_CLIENT_COMMUNICATOR_H
 #define ARANGODB_SIMPLE_HTTP_CLIENT_COMMUNICATOR_H 1
@@ -150,7 +175,6 @@ class Communicator {
   std::unordered_map<uint64_t, std::unique_ptr<CurlHandle>> _handlesInProgress;
   
   CURLM* _curl;
-  CURLMcode _mc;
   curl_waitfd _wakeup;
 #ifdef _WIN32
   SOCKET _socks[2];
@@ -158,6 +182,9 @@ class Communicator {
   int _fds[2];
 #endif
   bool _enabled;
+  boost::asio::io_service _ioService;
+  boost::asio::deadline_timer _timer;
+  std::map<curl_socket_t, boost::asio::ip::tcp::socket *> _socketMap;
 
  private:
   void abortRequestInternal(Ticket ticketId);
@@ -173,6 +200,14 @@ class Communicator {
   void callErrorFn(RequestInProgress*, int const&, std::unique_ptr<GeneralResponse>);
   void callErrorFn(Ticket const&, Destination const&, Callbacks const&, int const&, std::unique_ptr<GeneralResponse>);
   void callSuccessFn(Ticket const&, Destination const&, Callbacks const&, std::unique_ptr<GeneralResponse>);
+  void addSocket(curl_socket_t s, CURL *easy, int action);
+  void setSocket(int *fdp, curl_socket_t s, CURL *e, int act, int oldact);
+  void removeSocket(int *f);
+  void eventCb(curl_socket_t s,
+               int action, const boost::system::error_code & error,
+               int *fdp);
+  void boostTimerCb(boost::system::error_code const& error);
+  int handleMultiSocket(curl_socket_t s, int const& action);
 
  private:
   static size_t readBody(void*, size_t, size_t, void*);
@@ -182,6 +217,12 @@ class Communicator {
   static int curlProgress(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
   static void logHttpHeaders(std::string const&, std::string const&);
   static void logHttpBody(std::string const&, std::string const&);
+  static curl_socket_t openSocket(void *clientp, curlsocktype purpose, struct curl_sockaddr *address);
+  static int closeSocket(void *clientp, curl_socket_t item);
+  static int sockCb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp);
+  static int curlTimerCb(CURLM *multi, long timeout_ms, void*);
+
+
 };
 }
 }

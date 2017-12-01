@@ -1067,3 +1067,11 @@ message(STATUS "building for git revision: ${ARANGODB_BUILD_REPOSITORY}")
 #     message(STATUS "${_variableName}=${${_variableName}}")
 #   endforeach ()
 # endif ()
+
+add_executable(testi
+  testi.cpp
+  lib/Basics/WorkMonitorDummy.cpp
+)
+target_link_libraries(testi
+  arangoserver
+)

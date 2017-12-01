@@ -30,6 +30,9 @@
 #include "Logger/Logger.h"
 #include "Rest/HttpRequest.h"
 
+#include <boost/asio.hpp>
+#include <boost/bind.hpp>
+
 using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::communicator;
@@ -131,9 +134,17 @@ std::atomic_uint_fast64_t NEXT_TICKET_ID(static_cast<uint64_t>(0));
 std::vector<char> urlDotSeparators{'/', '#', '?'};
 }
 
-Communicator::Communicator() : _curl(nullptr), _mc(CURLM_OK), _enabled(true) {
+Communicator::Communicator() : _curl(nullptr),
+                               _enabled(true),
+                               _ioService(),
+                               _timer(_ioService),
+                               _socketMap() {
   curl_global_init(CURL_GLOBAL_ALL);
   _curl = curl_multi_init();
+  curl_multi_setopt(_curl, CURLMOPT_SOCKETFUNCTION, Communicator::sockCb);
+  curl_multi_setopt(_curl, CURLMOPT_SOCKETDATA, this);
+  curl_multi_setopt(_curl, CURLMOPT_TIMERFUNCTION, Communicator::curlTimerCb);
+  curl_multi_setopt(_curl, CURLMOPT_TIMERDATA, this);
 
 #ifdef _WIN32
   int err = dumb_socketpair(_socks, 0);
@@ -193,7 +204,6 @@ Ticket Communicator::addRequest(Destination destination,
 
 int Communicator::work_once() {
   std::vector<NewRequest> newRequests;
-
   {
     MUTEX_LOCKER(guard, _newRequestsLock);
     newRequests.swap(_newRequests);
@@ -202,27 +212,13 @@ int Communicator::work_once() {
   for (auto const& newRequest : newRequests) {
     createRequestInProgress(newRequest);
   }
-
-  int stillRunning;
-  _mc = curl_multi_perform(_curl, &stillRunning);
-  if (_mc != CURLM_OK) {
-    throw std::runtime_error(
-        "Invalid curl multi result while performing! Result was " +
-        std::to_string(_mc));
+  int running;
+  {
+    MUTEX_LOCKER(guard, _handlesLock);
+    running = _handlesInProgress.size();
   }
-
-  // handle all messages received
-  CURLMsg* msg = nullptr;
-  int msgsLeft = 0;
-
-  while ((msg = curl_multi_info_read(_curl, &msgsLeft))) {
-    if (msg->msg == CURLMSG_DONE) {
-      CURL* handle = msg->easy_handle;
-
-      handleResult(handle, msg->data.result);
-    }
-  }
-  return stillRunning;
+  _ioService.run();
+  return running;
 }
 
 void Communicator::wait() {
@@ -322,6 +318,12 @@ void Communicator::createRequestInProgress(NewRequest const& newRequest) {
   // mop: XXX :S CURLE 51 and 60...
   curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
   curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
+
+  // boost asio socket stuff
+  curl_easy_setopt(handle, CURLOPT_OPENSOCKETFUNCTION, Communicator::openSocket);
+  curl_easy_setopt(handle, CURLOPT_OPENSOCKETDATA, this);
+  curl_easy_setopt(handle, CURLOPT_CLOSESOCKETFUNCTION, Communicator::closeSocket);
+  curl_easy_setopt(handle, CURLOPT_CLOSESOCKETDATA, this);  
 
   long connectTimeout =
       static_cast<long>(newRequest._options.connectionTimeout);
@@ -685,4 +687,251 @@ void Communicator::callSuccessFn(Ticket const& ticketId, Destination const& dest
     LOG_TOPIC(WARN, Logger::COMMUNICATION) << prefix << "success callback for request to "
       << destination.url() << " took " << (total) << "s";
   }
+}
+
+curl_socket_t Communicator::openSocket(void *clientp, curlsocktype purpose, struct curl_sockaddr *address) {
+  Communicator* communicator = (Communicator*) clientp;
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "opensocket";
+ 
+  curl_socket_t sockfd = CURL_SOCKET_BAD;
+  
+  // TODO IPV6
+  /* restrict to IPv4 */ 
+  if(purpose == CURLSOCKTYPE_IPCXN && address->family == AF_INET) {
+    /* create a tcp socket object */ 
+    boost::asio::ip::tcp::socket *tcp_socket =
+      new boost::asio::ip::tcp::socket(communicator->_ioService);
+ 
+    /* open it and get the native handle*/ 
+    boost::system::error_code ec;
+    tcp_socket->open(boost::asio::ip::tcp::v4(), ec);
+ 
+    if(ec) {
+      /* An error occurred */ 
+      LOG_TOPIC(WARN, Logger::COMMUNICATION) << "Couldn't open socket [" << ec << "][" <<
+        ec.message() << "]";
+    } else {
+      sockfd = tcp_socket->native_handle();
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Opened socket " << sockfd;
+ 
+      /* save it for monitoring */ 
+      communicator->_socketMap.insert(std::pair<curl_socket_t,
+                        boost::asio::ip::tcp::socket *>(sockfd, tcp_socket));
+    }
+  } else {
+    TRI_ASSERT(false);
+  }
+ 
+  return sockfd;
+}
+
+int Communicator::closeSocket(void *clientp, curl_socket_t item) {
+  Communicator* communicator = (Communicator*) clientp;
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "close_socket : " << item;
+ 
+  std::map<curl_socket_t, boost::asio::ip::tcp::socket *>::iterator it =
+    communicator->_socketMap.find(item);
+ 
+  if(it != communicator->_socketMap.end()) {
+    delete it->second;
+    communicator->_socketMap.erase(it);
+  }
+ 
+  return 0;
+}
+
+int Communicator::sockCb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp) {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "sock_cb: socket=" << s
+    << ", what=" << what << ", sockp=" << sockp;
+ 
+  Communicator* communicator = (Communicator*) cbp;
+  int *actionp = (int *) sockp;
+  const char *whatstr[] = { "none", "IN", "OUT", "INOUT", "REMOVE"};
+ 
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "socket callback: s=" << s
+    << " e=" << e << " what=" <<  whatstr[what];
+ 
+  if(what == CURL_POLL_REMOVE) {
+    communicator->removeSocket(actionp);
+  } else if (!actionp) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Adding data: " << whatstr[what];
+    communicator->addSocket(s, e, what);
+  } else {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Changing action from "
+        << whatstr[*actionp] << " to " << whatstr[what];
+    communicator->setSocket(actionp, s, e, what, *actionp);
+  }
+ 
+  return 0;
+}
+
+void Communicator::removeSocket(int *f) {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "removeSocket";
+ 
+  if(f) {
+    free(f);
+  }
+}
+ 
+void Communicator::setSocket(int *fdp, curl_socket_t s, CURL *e, int act, int oldact) {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "setsock: socket=" << s << ", act=" << act << ", fdp=" << fdp;
+ 
+  std::map<curl_socket_t, boost::asio::ip::tcp::socket *>::iterator it =
+    _socketMap.find(s);
+ 
+  if(it == _socketMap.end()) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "socket " << s << " is a c-ares socket, ignoring";
+    return;
+  }
+ 
+  boost::asio::ip::tcp::socket * tcp_socket = it->second;
+ 
+  *fdp = act;
+ 
+  if(act == CURL_POLL_IN) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "watching for socket to become readable";
+    if(oldact != CURL_POLL_IN && oldact != CURL_POLL_INOUT) {
+      tcp_socket->async_read_some(boost::asio::null_buffers(),
+                                  boost::bind(&Communicator::eventCb, this, s,
+                                              CURL_POLL_IN, _1, fdp));
+    }
+  } else if(act == CURL_POLL_OUT) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "watching for socket to become writable";
+    if(oldact != CURL_POLL_OUT && oldact != CURL_POLL_INOUT) {
+      tcp_socket->async_write_some(boost::asio::null_buffers(),
+                                   boost::bind(&Communicator::eventCb, this, s,
+                                               CURL_POLL_OUT, _1, fdp));
+    }
+  } else if(act == CURL_POLL_INOUT) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "watching for socket to become readable & writable";
+    if(oldact != CURL_POLL_IN && oldact != CURL_POLL_INOUT) {
+      tcp_socket->async_read_some(boost::asio::null_buffers(),
+                                  boost::bind(&Communicator::eventCb, this, s,
+                                              CURL_POLL_IN, _1, fdp));
+    }
+    if(oldact != CURL_POLL_OUT && oldact != CURL_POLL_INOUT) {
+      tcp_socket->async_write_some(boost::asio::null_buffers(),
+                                   boost::bind(&Communicator::eventCb, this, s,
+                                               CURL_POLL_OUT, _1, fdp));
+    }
+  }
+}
+ 
+void Communicator::addSocket(curl_socket_t s, CURL *easy, int action) {
+  /* fdp is used to store current action */ 
+  int *fdp = (int *) calloc(sizeof(int), 1);
+ 
+  setSocket(fdp, s, easy, action, 0);
+  curl_multi_assign(_curl, s, fdp);
+}
+
+/* Called by asio when there is an action on a socket */
+void Communicator::eventCb(curl_socket_t s,
+                     int action, const boost::system::error_code & error,
+                     int *fdp) {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "event_cb: action=" << action;
+
+  if(_socketMap.find(s) == _socketMap.end()) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "event_cb: socket already closed";
+    return;
+  }
+
+  /* make sure the event matches what are wanted */
+  if(*fdp == action || *fdp == CURL_POLL_INOUT) {
+    if(error) {
+      action = CURL_CSELECT_ERR;
+    }
+
+    if (handleMultiSocket(s, action) <= 0) {
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "work done. canceling timer";
+      _timer.cancel();
+    }
+
+    /* keep on watching.
+     * the socket may have been closed and/or fdp may have been changed
+     * in curl_multi_socket_action(), so check them both */
+    if(!error && _socketMap.find(s) != _socketMap.end() &&
+       (*fdp == action || *fdp == CURL_POLL_INOUT)) {
+      boost::asio::ip::tcp::socket *tcp_socket = _socketMap.find(s)->second;
+
+      if(action == CURL_POLL_IN) {
+        tcp_socket->async_read_some(boost::asio::null_buffers(),
+                                    boost::bind(&Communicator::eventCb, this, s,
+                                                action, _1, fdp));
+      }
+      if(action == CURL_POLL_OUT) {
+        tcp_socket->async_write_some(boost::asio::null_buffers(),
+                                     boost::bind(&Communicator::eventCb, this, s,
+                                                 action, _1, fdp));
+      }
+    }
+  }
+}
+
+/* Update the event timer after curl_multi library calls */
+int Communicator::curlTimerCb(CURLM *multi, long timeout_ms, void* userp) {
+  Communicator* communicator = (Communicator*) userp;
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi_timer_cb: timeout_ms " << timeout_ms;
+
+  /* cancel running timer */
+  communicator->_timer.cancel();
+
+  if(timeout_ms > 0) {
+    /* update timer */
+    communicator->_timer.expires_from_now(boost::posix_time::millisec(timeout_ms));
+    communicator->_timer.async_wait(boost::bind(&Communicator::boostTimerCb, communicator, _1));
+  } else if(timeout_ms == 0) {
+    /* call timeout function immediately */
+    boost::system::error_code error; /*success*/
+    communicator->boostTimerCb(error);
+  } else {
+    TRI_ASSERT(false);
+  }
+
+  return 0;
+}
+
+void Communicator::boostTimerCb(boost::system::error_code const& error) {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "boost cb " << error.message();
+  if(!error) {
+    handleMultiSocket(CURL_SOCKET_TIMEOUT, 0);
+  }
+}
+
+int Communicator::handleMultiSocket(curl_socket_t s, int const& action) {
+  // TODO is this the correct place?
+  std::vector<NewRequest> newRequests;
+
+  {
+    MUTEX_LOCKER(guard, _newRequestsLock);
+    newRequests.swap(_newRequests);
+  }
+
+  for (auto const& newRequest : newRequests) {
+    createRequestInProgress(newRequest);
+  }
+
+  int stillRunning = 0;
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi socket" << s << " " << action;
+  CURLMcode rc = curl_multi_socket_action(_curl, s, action, &stillRunning);
+
+  if (rc != CURLM_OK) {
+    throw std::runtime_error(
+        "Invalid curl multi result while performing! Result was " +
+        std::to_string(rc));
+  }
+
+  // handle all messages received
+  CURLMsg* msg = nullptr;
+  int msgsLeft = 0;
+
+  while ((msg = curl_multi_info_read(_curl, &msgsLeft))) {
+    if (msg->msg == CURLMSG_DONE) {
+      CURL* handle = msg->easy_handle;
+
+      handleResult(handle, msg->data.result);
+    }
+  }
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "REMAINING: " << stillRunning;
+  return stillRunning;
 }
