@@ -154,6 +154,12 @@ class Communicator {
   void abortRequests();
   void disable() { _enabled = false; };
   void enable()  { _enabled = true; };
+  void work() {
+    _ioService.run();
+  }
+  void stop() {
+    _ioService.stop();
+  }
 
 
  private:
@@ -168,10 +174,10 @@ class Communicator {
   struct CurlData {};
 
  private:
-  Mutex _newRequestsLock;
+  //Mutex _newRequestsLock;
   std::vector<NewRequest> _newRequests;
 
-  Mutex _handlesLock;
+  //Mutex _handlesLock;
   std::unordered_map<uint64_t, std::unique_ptr<CurlHandle>> _handlesInProgress;
   
   CURLM* _curl;
@@ -184,6 +190,7 @@ class Communicator {
   bool _enabled;
   boost::asio::io_service _ioService;
   boost::asio::deadline_timer _timer;
+  boost::asio::io_service::work _work;
   std::map<curl_socket_t, boost::asio::ip::tcp::socket *> _socketMap;
 
  private:
@@ -208,6 +215,7 @@ class Communicator {
                int *fdp);
   void boostTimerCb(boost::system::error_code const& error);
   int handleMultiSocket(curl_socket_t s, int const& action);
+
 
  private:
   static size_t readBody(void*, size_t, size_t, void*);

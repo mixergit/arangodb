@@ -138,7 +138,10 @@ Communicator::Communicator() : _curl(nullptr),
                                _enabled(true),
                                _ioService(),
                                _timer(_ioService),
+                               _work(_ioService),
                                _socketMap() {
+  boost::asio::io_service::work work(_ioService);
+
   curl_global_init(CURL_GLOBAL_ALL);
   _curl = curl_multi_init();
   curl_multi_setopt(_curl, CURLMOPT_SOCKETFUNCTION, Communicator::sockCb);
@@ -181,9 +184,10 @@ Ticket Communicator::addRequest(Destination destination,
 
   {
     TRI_ASSERT(request != nullptr);
-    MUTEX_LOCKER(guard, _newRequestsLock);
-    _newRequests.emplace_back(
-        NewRequest{destination, std::move(request), callbacks, options, id});
+    //MUTEX_LOCKER(guard, _newRequestsLock);
+    createRequestInProgress(NewRequest{destination, std::move(request), callbacks, options, id});
+    //_newRequests.emplace_back(
+    //    );
   }
 
   LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "request to " << destination.url() << " has been put onto queue";
@@ -205,7 +209,7 @@ Ticket Communicator::addRequest(Destination destination,
 int Communicator::work_once() {
   std::vector<NewRequest> newRequests;
   {
-    MUTEX_LOCKER(guard, _newRequestsLock);
+    //MUTEX_LOCKER(guard, _newRequestsLock);
     newRequests.swap(_newRequests);
   }
 
@@ -214,10 +218,15 @@ int Communicator::work_once() {
   }
   int running;
   {
-    MUTEX_LOCKER(guard, _handlesLock);
+    //MUTEX_LOCKER(guard, _handlesLock);
     running = _handlesInProgress.size();
   }
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "RUNNING";
+  // if (newRequests.size() > 0) {
+  //   handleMultiSocket(CURL_SOCKET_TIMEOUT, 0);
+  // }
   _ioService.run();
+  _ioService.reset();
   return running;
 }
 
@@ -387,7 +396,7 @@ void Communicator::createRequestInProgress(NewRequest const& newRequest) {
   handleInProgress->_rip->_startTime = TRI_microtime();
  
   { 
-    MUTEX_LOCKER(guard, _handlesLock);
+    //MUTEX_LOCKER(guard, _handlesLock);
     _handlesInProgress.emplace(newRequest._ticketId, std::move(handleInProgress));
   }
   curl_multi_add_handle(_curl, handle);
@@ -416,7 +425,7 @@ void Communicator::handleResult(CURL* handle, CURLcode rc) {
         << prefix << "Curl error details: " << rip->_errorBuffer;
   }
 
-  MUTEX_LOCKER(guard, _handlesLock);
+  //MUTEX_LOCKER(guard, _handlesLock);
   switch (rc) {
     case CURLE_OK: {
       long httpStatusCode = 200;
@@ -609,13 +618,13 @@ std::string Communicator::createSafeDottedCurlUrl(
 }
 
 void Communicator::abortRequest(Ticket ticketId) {
-  MUTEX_LOCKER(guard, _handlesLock);
+  //MUTEX_LOCKER(guard, _handlesLock);
 
   abortRequestInternal(ticketId);
 }
 
 void Communicator::abortRequests() {
-  MUTEX_LOCKER(guard, _handlesLock);
+  //MUTEX_LOCKER(guard, _handlesLock);
 
   for (auto& request : requestsInProgress()) {
     abortRequestInternal(request->_ticketId);
@@ -624,7 +633,7 @@ void Communicator::abortRequests() {
 
 // needs _handlesLock! 
 std::vector<RequestInProgress const*> Communicator::requestsInProgress() {
-  _handlesLock.assertLockedByCurrentThread();
+  //_handlesLock.assertLockedByCurrentThread();
 
   std::vector<RequestInProgress const*> vec;
     
@@ -641,7 +650,7 @@ std::vector<RequestInProgress const*> Communicator::requestsInProgress() {
 
 // needs _handlesLock! 
 void Communicator::abortRequestInternal(Ticket ticketId) {
-  _handlesLock.assertLockedByCurrentThread();
+  //_handlesLock.assertLockedByCurrentThread();
 
   auto handle = _handlesInProgress.find(ticketId);
   if (handle == _handlesInProgress.end()) {
@@ -766,7 +775,7 @@ int Communicator::sockCb(CURL *e, curl_socket_t s, int what, void *cbp, void *so
 }
 
 void Communicator::removeSocket(int *f) {
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "removeSocket";
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "removeSocket " << f;
  
   if(f) {
     free(f);
@@ -843,7 +852,7 @@ void Communicator::eventCb(curl_socket_t s,
     }
 
     if (handleMultiSocket(s, action) <= 0) {
-      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "work done. canceling timer";
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "work done. canceling timer " << &_timer;
       _timer.cancel();
     }
 
@@ -865,13 +874,15 @@ void Communicator::eventCb(curl_socket_t s,
                                                  action, _1, fdp));
       }
     }
+  } else {
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "FAIL ELSE";
   }
 }
 
 /* Update the event timer after curl_multi library calls */
 int Communicator::curlTimerCb(CURLM *multi, long timeout_ms, void* userp) {
   Communicator* communicator = (Communicator*) userp;
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi_timer_cb: timeout_ms " << timeout_ms;
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi_timer_cb: " << &communicator->_timer << " timeout_ms " << timeout_ms;
 
   /* cancel running timer */
   communicator->_timer.cancel();
@@ -880,39 +891,25 @@ int Communicator::curlTimerCb(CURLM *multi, long timeout_ms, void* userp) {
     /* update timer */
     communicator->_timer.expires_from_now(boost::posix_time::millisec(timeout_ms));
     communicator->_timer.async_wait(boost::bind(&Communicator::boostTimerCb, communicator, _1));
-  } else if(timeout_ms == 0) {
+  } else if (timeout_ms == 0) {
     /* call timeout function immediately */
     boost::system::error_code error; /*success*/
     communicator->boostTimerCb(error);
-  } else {
-    TRI_ASSERT(false);
   }
 
   return 0;
 }
 
 void Communicator::boostTimerCb(boost::system::error_code const& error) {
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "boost cb " << error.message();
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "boost timer cb " << error.message();
   if(!error) {
     handleMultiSocket(CURL_SOCKET_TIMEOUT, 0);
   }
 }
 
 int Communicator::handleMultiSocket(curl_socket_t s, int const& action) {
-  // TODO is this the correct place?
-  std::vector<NewRequest> newRequests;
-
-  {
-    MUTEX_LOCKER(guard, _newRequestsLock);
-    newRequests.swap(_newRequests);
-  }
-
-  for (auto const& newRequest : newRequests) {
-    createRequestInProgress(newRequest);
-  }
-
   int stillRunning = 0;
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi socket" << s << " " << action;
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi socket " << s << " " << action;
   CURLMcode rc = curl_multi_socket_action(_curl, s, action, &stillRunning);
 
   if (rc != CURLM_OK) {
