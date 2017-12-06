@@ -1,6 +1,8 @@
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <thread>
 
 #include "Logger/Logger.h"
@@ -15,14 +17,14 @@ using namespace arangodb::communicator;
 
 int main() {
   arangodb::Logger::initialize(false);
-  //arangodb::Logger::setLogLevel("communication=trace");
+  arangodb::Logger::setLogLevel("communication=trace");
   arangodb::LogAppender::addAppender("-");
   Communicator communicator;
 
   std::string body("{\"test\": \"test\"}");
   auto start = std::chrono::high_resolution_clock::now();
 
-  int numRequests = 100000;
+  int numRequests = 1000;
 
   std::mutex m;
   std::condition_variable cond_var;

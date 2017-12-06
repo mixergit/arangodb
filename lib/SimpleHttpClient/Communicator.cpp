@@ -39,97 +39,6 @@ using namespace arangodb::communicator;
 
 namespace {
 
-#ifdef _WIN32
-/* socketpair.c
-Copyright 2007, 2010 by Nathan C. Myers <ncm@cantrip.org>
-Redistribution and use in source and binary forms, with or without modification,
-are permitted provided that the following conditions are met:
-Redistributions of source code must retain the above copyright notice, this
-list of conditions and the following disclaimer.
-Redistributions in binary form must reproduce the above copyright notice,
-this list of conditions and the following disclaimer in the documentation
-and/or other materials provided with the distribution.
-The name of the author must not be used to endorse or promote products
-derived from this software without specific prior written permission.
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
-static int dumb_socketpair(SOCKET socks[2], int make_overlapped) {
-  union {
-    struct sockaddr_in inaddr;
-    struct sockaddr addr;
-  } a;
-  memset(&a, 0, sizeof(a)); // clear memory before using the struct!
-
-  SOCKET listener;
-  int e;
-  socklen_t addrlen = sizeof(a.inaddr);
-  DWORD flags = (make_overlapped ? WSA_FLAG_OVERLAPPED : 0);
-  int reuse = 1;
-
-  if (socks == 0) {
-    WSASetLastError(WSAEINVAL);
-    return SOCKET_ERROR;
-  }
-  socks[0] = socks[1] = -1;
-
-  listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (listener == -1) return SOCKET_ERROR;
-
-  memset(&a, 0, sizeof(a));
-  a.inaddr.sin_family = AF_INET;
-  a.inaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  a.inaddr.sin_port = 0;
-
-  for (;;) {
-    if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse,
-                   (socklen_t)sizeof(reuse)) == -1)
-      break;
-    if (bind(listener, &a.addr, sizeof(a.inaddr)) == SOCKET_ERROR) break;
-
-    memset(&a, 0, sizeof(a));
-    if (getsockname(listener, &a.addr, &addrlen) == SOCKET_ERROR) break;
-    // win32 getsockname may only set the port number, p=0.0005.
-    // ( http://msdn.microsoft.com/library/ms738543.aspx ):
-    a.inaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.inaddr.sin_family = AF_INET;
-
-    if (listen(listener, 1) == SOCKET_ERROR) break;
-
-    socks[0] = WSASocketW(AF_INET, SOCK_STREAM, 0, NULL, 0, flags);
-    if (socks[0] == -1) break;
-    if (connect(socks[0], &a.addr, sizeof(a.inaddr)) == SOCKET_ERROR) break;
-
-    socks[1] = accept(listener, NULL, NULL);
-    if (socks[1] == -1) break;
-
-    closesocket(listener);
-
-    u_long mode = 1;
-    int res = ioctlsocket(socks[0], FIONBIO, &mode);
-    if (res != NO_ERROR) break;
-
-    return 0;
-  }
-
-  e = WSAGetLastError();
-  closesocket(listener);
-  closesocket(socks[0]);
-  closesocket(socks[1]);
-  WSASetLastError(e);
-  socks[0] = socks[1] = -1;
-  return SOCKET_ERROR;
-}
-#endif
-
 std::atomic_uint_fast64_t NEXT_TICKET_ID(static_cast<uint64_t>(0));
 std::vector<char> urlDotSeparators{'/', '#', '?'};
 }
@@ -140,36 +49,12 @@ Communicator::Communicator() : _curl(nullptr),
                                _timer(_ioService),
                                _work(_ioService),
                                _socketMap() {
-  boost::asio::io_service::work work(_ioService);
-
   curl_global_init(CURL_GLOBAL_ALL);
   _curl = curl_multi_init();
   curl_multi_setopt(_curl, CURLMOPT_SOCKETFUNCTION, Communicator::sockCb);
   curl_multi_setopt(_curl, CURLMOPT_SOCKETDATA, this);
   curl_multi_setopt(_curl, CURLMOPT_TIMERFUNCTION, Communicator::curlTimerCb);
   curl_multi_setopt(_curl, CURLMOPT_TIMERDATA, this);
-
-#ifdef _WIN32
-  int err = dumb_socketpair(_socks, 0);
-  if (err != 0) {
-    throw std::runtime_error("Couldn't setup sockets. Error was: " +
-                             std::to_string(err));
-  }
-  _wakeup.fd = _socks[0];
-#else
-  int result = pipe(_fds);
-  if (result != 0) {
-    throw std::runtime_error("Couldn't setup pipe. Return code was: " +
-                             std::to_string(result));
-  }
-
-  TRI_socket_t socket = {.fileDescriptor = _fds[0]};
-  TRI_SetNonBlockingSocket(socket);
-  _wakeup.fd = _fds[0];
-#endif
-
-  _wakeup.events = CURL_WAIT_POLLIN | CURL_WAIT_POLLPRI;
-  // TODO: does _wakeup.revents has to be initialized here?
 }
 
 Communicator::~Communicator() {
@@ -181,75 +66,10 @@ Ticket Communicator::addRequest(Destination destination,
                                 std::unique_ptr<GeneralRequest> request,
                                 Callbacks callbacks, Options options) {
   uint64_t id = NEXT_TICKET_ID.fetch_add(1, std::memory_order_seq_cst);
-
-  {
-    TRI_ASSERT(request != nullptr);
-    //MUTEX_LOCKER(guard, _newRequestsLock);
-    createRequestInProgress(NewRequest{destination, std::move(request), callbacks, options, id});
-    //_newRequests.emplace_back(
-    //    );
-  }
-
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "request to " << destination.url() << " has been put onto queue";
-  // mop: just send \0 terminated empty string to wake up worker thread
-#ifdef _WIN32
-  ssize_t numBytes = send(_socks[1], "", 1, 0);
-#else
-  ssize_t numBytes = write(_fds[1], "", 1);
-#endif
-
-  if (numBytes != 1) {
-    LOG_TOPIC(WARN, Logger::COMMUNICATION)
-        << "Couldn't wake up pipe. numBytes was " + std::to_string(numBytes);
-  }
+  TRI_ASSERT(request);
+  createRequestInProgress(NewRequest{destination, std::move(request), callbacks, options, id});
 
   return Ticket{id};
-}
-
-int Communicator::work_once() {
-  std::vector<NewRequest> newRequests;
-  {
-    //MUTEX_LOCKER(guard, _newRequestsLock);
-    newRequests.swap(_newRequests);
-  }
-
-  for (auto const& newRequest : newRequests) {
-    createRequestInProgress(newRequest);
-  }
-  int running;
-  {
-    //MUTEX_LOCKER(guard, _handlesLock);
-    running = _handlesInProgress.size();
-  }
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "RUNNING";
-  // if (newRequests.size() > 0) {
-  //   handleMultiSocket(CURL_SOCKET_TIMEOUT, 0);
-  // }
-  _ioService.run();
-  _ioService.reset();
-  return running;
-}
-
-void Communicator::wait() {
-  static int const MAX_WAIT_MSECS = 1000;  // wait max. 1 seconds
-
-  int numFds;  // not used here
-  int res = curl_multi_wait(_curl, &_wakeup, 1, MAX_WAIT_MSECS, &numFds);
-  if (res != CURLM_OK) {
-    throw std::runtime_error(
-        "Invalid curl multi result while waiting! Result was " +
-        std::to_string(res));
-  }
-
-  // drain the pipe
-  char a[16];
-#ifdef _WIN32
-  while (0 < recv(_socks[0], a, sizeof(a), 0)) {
-  }
-#else
-  while (0 < read(_fds[0], a, sizeof(a))) {
-  }
-#endif
 }
 
 // -----------------------------------------------------------------------------
@@ -396,15 +216,21 @@ void Communicator::createRequestInProgress(NewRequest const& newRequest) {
   handleInProgress->_rip->_startTime = TRI_microtime();
  
   { 
-    //MUTEX_LOCKER(guard, _handlesLock);
+    MUTEX_LOCKER(guard, _handlesLock);
     _handlesInProgress.emplace(newRequest._ticketId, std::move(handleInProgress));
   }
-  curl_multi_add_handle(_curl, handle);
+  {
+    //MUTEX_LOCKER(guard, _curlLock);
+    curl_multi_add_handle(_curl, handle);
+  }
 }
 
 void Communicator::handleResult(CURL* handle, CURLcode rc) {
   // remove request in progress
-  curl_multi_remove_handle(_curl, handle);
+  {
+    //MUTEX_LOCKER(guard, _curlLock);
+    curl_multi_remove_handle(_curl, handle);
+  }
 
   RequestInProgress* rip = nullptr;
   curl_easy_getinfo(handle, CURLINFO_PRIVATE, &rip);
@@ -478,7 +304,8 @@ void Communicator::handleResult(CURL* handle, CURLcode rc) {
       callErrorFn(rip, TRI_ERROR_INTERNAL, {nullptr});
       break;
   } 
-    
+  
+  MUTEX_LOCKER(guard, _handlesLock);  
   _handlesInProgress.erase(rip->_ticketId);
 }
 
@@ -703,34 +530,32 @@ curl_socket_t Communicator::openSocket(void *clientp, curlsocktype purpose, stru
   LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "opensocket";
  
   curl_socket_t sockfd = CURL_SOCKET_BAD;
-  
-  // TODO IPV6
-  /* restrict to IPv4 */ 
+
+  /* restrict to IPv4 */
   if(purpose == CURLSOCKTYPE_IPCXN && address->family == AF_INET) {
-    /* create a tcp socket object */ 
+    /* create a tcp socket object */
     boost::asio::ip::tcp::socket *tcp_socket =
       new boost::asio::ip::tcp::socket(communicator->_ioService);
- 
-    /* open it and get the native handle*/ 
+
+    /* open it and get the native handle*/
     boost::system::error_code ec;
     tcp_socket->open(boost::asio::ip::tcp::v4(), ec);
- 
+
     if(ec) {
-      /* An error occurred */ 
-      LOG_TOPIC(WARN, Logger::COMMUNICATION) << "Couldn't open socket [" << ec << "][" <<
+      /* An error occurred */
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Couldn't open socket [" << ec << "][" <<
         ec.message() << "]";
-    } else {
+    }
+    else {
       sockfd = tcp_socket->native_handle();
-      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Opened socket " << sockfd;
- 
-      /* save it for monitoring */ 
+      // fprintf(MSG_OUT, "\nOpened socket %d", sockfd);
+
+      /* save it for monitoring */
       communicator->_socketMap.insert(std::pair<curl_socket_t,
                         boost::asio::ip::tcp::socket *>(sockfd, tcp_socket));
     }
-  } else {
-    TRI_ASSERT(false);
   }
- 
+
   return sockfd;
 }
 
@@ -740,37 +565,41 @@ int Communicator::closeSocket(void *clientp, curl_socket_t item) {
  
   std::map<curl_socket_t, boost::asio::ip::tcp::socket *>::iterator it =
     communicator->_socketMap.find(item);
- 
+
   if(it != communicator->_socketMap.end()) {
     delete it->second;
     communicator->_socketMap.erase(it);
   }
- 
+
   return 0;
 }
 
 int Communicator::sockCb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp) {
   LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "sock_cb: socket=" << s
     << ", what=" << what << ", sockp=" << sockp;
- 
-  Communicator* communicator = (Communicator*) cbp;
+
+  Communicator *communicator = (Communicator*) cbp;
   int *actionp = (int *) sockp;
   const char *whatstr[] = { "none", "IN", "OUT", "INOUT", "REMOVE"};
- 
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "socket callback: s=" << s
-    << " e=" << e << " what=" <<  whatstr[what];
- 
+
+  // fprintf(MSG_OUT,
+//          "\nsocket callback: s=%d e=%p what=%s ", s, e, whatstr[what]);
+
   if(what == CURL_POLL_REMOVE) {
+    // fprintf(MSG_OUT, "\n");
     communicator->removeSocket(actionp);
-  } else if (!actionp) {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Adding data: " << whatstr[what];
-    communicator->addSocket(s, e, what);
-  } else {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Changing action from "
-        << whatstr[*actionp] << " to " << whatstr[what];
-    communicator->setSocket(actionp, s, e, what, *actionp);
   }
- 
+  else {
+    if(!actionp) {
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Adding data: " << whatstr[what];
+      communicator->addSocket(s, e, what);
+    }
+    else {
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Changing action from " << whatstr[*actionp] << " to " << whatstr[what];
+      communicator->setSocket(actionp, s, e, what, *actionp);
+    }
+  }
+
   return 0;
 }
 
@@ -783,20 +612,20 @@ void Communicator::removeSocket(int *f) {
 }
  
 void Communicator::setSocket(int *fdp, curl_socket_t s, CURL *e, int act, int oldact) {
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "setsock: socket=" << s << ", act=" << act << ", fdp=" << fdp;
- 
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "setsock: socket=" << s << ", act=" << oldact << "=>" << act << ", fdp=" << fdp;
+
   std::map<curl_socket_t, boost::asio::ip::tcp::socket *>::iterator it =
     _socketMap.find(s);
- 
+
   if(it == _socketMap.end()) {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "socket " << s << " is a c-ares socket, ignoring";
+    // fprintf(MSG_OUT, "\nsocket %d is a c-ares socket, ignoring", s);
     return;
   }
- 
+
   boost::asio::ip::tcp::socket * tcp_socket = it->second;
- 
+
   *fdp = act;
- 
+
   if(act == CURL_POLL_IN) {
     LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "watching for socket to become readable";
     if(oldact != CURL_POLL_IN && oldact != CURL_POLL_INOUT) {
@@ -804,15 +633,17 @@ void Communicator::setSocket(int *fdp, curl_socket_t s, CURL *e, int act, int ol
                                   boost::bind(&Communicator::eventCb, this, s,
                                               CURL_POLL_IN, _1, fdp));
     }
-  } else if(act == CURL_POLL_OUT) {
+  }
+  else if(act == CURL_POLL_OUT) {
     LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "watching for socket to become writable";
     if(oldact != CURL_POLL_OUT && oldact != CURL_POLL_INOUT) {
       tcp_socket->async_write_some(boost::asio::null_buffers(),
                                    boost::bind(&Communicator::eventCb, this, s,
                                                CURL_POLL_OUT, _1, fdp));
     }
-  } else if(act == CURL_POLL_INOUT) {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "watching for socket to become readable & writable";
+  }
+  else if(act == CURL_POLL_INOUT) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "watching for socket to become r/w";
     if(oldact != CURL_POLL_IN && oldact != CURL_POLL_INOUT) {
       tcp_socket->async_read_some(boost::asio::null_buffers(),
                                   boost::bind(&Communicator::eventCb, this, s,
@@ -838,7 +669,7 @@ void Communicator::addSocket(curl_socket_t s, CURL *easy, int action) {
 void Communicator::eventCb(curl_socket_t s,
                      int action, const boost::system::error_code & error,
                      int *fdp) {
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "event_cb: action=" << action;
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "event_cb: action=" << action << " error=" << error;
 
   if(_socketMap.find(s) == _socketMap.end()) {
     LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "event_cb: socket already closed";
@@ -847,9 +678,8 @@ void Communicator::eventCb(curl_socket_t s,
 
   /* make sure the event matches what are wanted */
   if(*fdp == action || *fdp == CURL_POLL_INOUT) {
-    if(error) {
+    if(error)
       action = CURL_CSELECT_ERR;
-    }
 
     if (handleMultiSocket(s, action) <= 0) {
       LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "work done. canceling timer " << &_timer;
@@ -874,8 +704,6 @@ void Communicator::eventCb(curl_socket_t s,
                                                  action, _1, fdp));
       }
     }
-  } else {
-      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "FAIL ELSE";
   }
 }
 
@@ -883,15 +711,14 @@ void Communicator::eventCb(curl_socket_t s,
 int Communicator::curlTimerCb(CURLM *multi, long timeout_ms, void* userp) {
   Communicator* communicator = (Communicator*) userp;
   LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi_timer_cb: " << &communicator->_timer << " timeout_ms " << timeout_ms;
-
-  /* cancel running timer */
   communicator->_timer.cancel();
 
   if(timeout_ms > 0) {
     /* update timer */
     communicator->_timer.expires_from_now(boost::posix_time::millisec(timeout_ms));
     communicator->_timer.async_wait(boost::bind(&Communicator::boostTimerCb, communicator, _1));
-  } else if (timeout_ms == 0) {
+  }
+  else if(timeout_ms == 0) {
     /* call timeout function immediately */
     boost::system::error_code error; /*success*/
     communicator->boostTimerCb(error);
@@ -911,6 +738,7 @@ int Communicator::handleMultiSocket(curl_socket_t s, int const& action) {
   int stillRunning = 0;
   LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi socket " << s << " " << action;
   CURLMcode rc = curl_multi_socket_action(_curl, s, action, &stillRunning);
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "multi socket result: " << rc;
 
   if (rc != CURLM_OK) {
     throw std::runtime_error(
@@ -929,6 +757,7 @@ int Communicator::handleMultiSocket(curl_socket_t s, int const& action) {
       handleResult(handle, msg->data.result);
     }
   }
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "REMAINING: " << stillRunning;
-  return stillRunning;
+  MUTEX_LOCKER(guard, _handlesLock); 
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "REMAINING: " << _handlesInProgress.size();
+  return _handlesInProgress.size();
 }

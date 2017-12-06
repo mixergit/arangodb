@@ -1247,8 +1247,8 @@ void ClusterCommThread::run() {
   while (!isStopping()) {
     try {
       abortRequestsToFailedServers();
-      _cc->communicator()->work_once();
-      _cc->communicator()->wait();
+      //_cc->communicator()->work_once();
+      //_cc->communicator()->wait();
       LOG_TOPIC(TRACE, Logger::CLUSTER) << "done waiting in ClusterCommThread";
     } catch (std::exception const& ex) {
       LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "caught exception in ClusterCommThread: " << ex.what();
@@ -1258,9 +1258,9 @@ void ClusterCommThread::run() {
   }
   _cc->communicator()->abortRequests();
   LOG_TOPIC(DEBUG, Logger::CLUSTER) << "waiting for curl to stop remaining handles";
-  while (_cc->communicator()->work_once() > 0) {
-    usleep(10);
-  }
+  // while (_cc->communicator()->work_once() > 0) {
+  //   usleep(10);
+  // }
 
   LOG_TOPIC(DEBUG, Logger::CLUSTER) << "stopped ClusterComm thread";
 }

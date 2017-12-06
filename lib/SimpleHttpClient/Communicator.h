@@ -62,6 +62,19 @@
 
 namespace arangodb {
 namespace communicator {
+
+class CommunicationResult: public Result {
+ public:
+  CommunicationResult(int errorNumber, std::unique_ptr<HttpResponse> _response)
+    : Result(errorNumber),
+      response(std::move(response)) {
+
+  }
+ private:
+  RequestInProgress* rip;
+  std::unique_ptr<HttpResponse> response;
+}
+
 typedef std::unordered_map<std::string, std::string> HeadersInProgress;
 typedef uint64_t Ticket;
 
@@ -148,8 +161,6 @@ class Communicator {
   Ticket addRequest(Destination, std::unique_ptr<GeneralRequest>, Callbacks,
                     Options);
 
-  int work_once();
-  void wait();
   void abortRequest(Ticket ticketId);
   void abortRequests();
   void disable() { _enabled = false; };
@@ -174,19 +185,11 @@ class Communicator {
   struct CurlData {};
 
  private:
-  //Mutex _newRequestsLock;
-  std::vector<NewRequest> _newRequests;
-
-  //Mutex _handlesLock;
+  Mutex _handlesLock;
   std::unordered_map<uint64_t, std::unique_ptr<CurlHandle>> _handlesInProgress;
   
   CURLM* _curl;
-  curl_waitfd _wakeup;
-#ifdef _WIN32
-  SOCKET _socks[2];
-#else
-  int _fds[2];
-#endif
+
   bool _enabled;
   boost::asio::io_service _ioService;
   boost::asio::deadline_timer _timer;
