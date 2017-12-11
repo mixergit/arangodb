@@ -118,13 +118,12 @@ struct RequestInProgress {
 };
 
 struct CurlHandle {
-  explicit CurlHandle(RequestInProgress* rip) : _handle(nullptr), _rip(rip) {
-    _handle = curl_easy_init();
+  explicit CurlHandle(CURL* prototype, RequestInProgress* rip) : _handle(nullptr), _rip(rip) {
+    _handle = curl_easy_duphandle(prototype);
     if (_handle == nullptr) {
       THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
     }
     curl_easy_setopt(_handle, CURLOPT_PRIVATE, _rip.get());
-    curl_easy_setopt(_handle, CURLOPT_PATH_AS_IS, 1L); 
   }
   ~CurlHandle() {
     if (_handle != nullptr) {
@@ -219,6 +218,8 @@ class CommunicatorThread: public Thread {
     Callbacks const& callbacks,
     std::unique_ptr<HttpResponse> response
   );
+
+  CURL* createPrototype();
  
  private:
   std::shared_ptr<boost::asio::io_service> _ioService;
@@ -227,6 +228,7 @@ class CommunicatorThread: public Thread {
   std::map<curl_socket_t, boost::asio::ip::tcp::socket *> _socketMap;
   Mutex _handlesLock;
   std::unordered_map<uint64_t, std::unique_ptr<CurlHandle>> _handlesInProgress;
+  CURL* _prototypeHandle;
 };
 
 }

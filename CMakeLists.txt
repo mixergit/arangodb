@@ -1075,3 +1075,11 @@ add_executable(testi
 target_link_libraries(testi
   arangoserver
 )
+
+add_executable(simpletesti
+  simpletesti.cpp
+  lib/Basics/WorkMonitorDummy.cpp
+)
+target_link_libraries(simpletesti
+  arangoserver
+)

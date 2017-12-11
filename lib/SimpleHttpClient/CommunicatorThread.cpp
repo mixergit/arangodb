@@ -66,7 +66,7 @@ void CommunicatorThread::createRequest(NewRequest* newRequestPtr) {
       std::string(request->body().c_str(), request->body().length()),
       newRequest->_options);
 
-  auto handleInProgress = std::make_unique<CurlHandle>(rip);
+  auto handleInProgress = std::make_unique<CurlHandle>(_prototypeHandle, rip);
 
   CURL* handle = handleInProgress->_handle;
   struct curl_slist* requestHeaders = nullptr;
@@ -100,31 +100,13 @@ void CommunicatorThread::createRequest(NewRequest* newRequestPtr) {
   curl_easy_setopt(handle, CURLOPT_HTTPHEADER, requestHeaders);
   //curl_easy_setopt(handle, CURLOPT_HEADER, 0L);
   curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(handle, CURLOPT_VERBOSE, 0L);
-  curl_easy_setopt(handle, CURLOPT_PROXY, "");
-  
-  // the xfer/progress options are only used to handle request abortions
-  curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
-  curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, CommunicatorThread::readBody);
-  curl_easy_setopt(handle, CURLOPT_WRITEDATA, handleInProgress->_rip.get());
-  curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, CommunicatorThread::readHeaders);
-  curl_easy_setopt(handle, CURLOPT_HEADERDATA, handleInProgress->_rip.get());
-  //curl_easy_setopt(handle, CURLOPT_DEBUGFUNCTION, CommunicatorThread::curlDebug);
-  //curl_easy_setopt(handle, CURLOPT_DEBUGDATA, handleInProgress->_rip.get());
+
   curl_easy_setopt(handle, CURLOPT_ERRORBUFFER,
                    handleInProgress->_rip.get()->_errorBuffer);
-  curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, CommunicatorThread::curlProgress);
+
   curl_easy_setopt(handle, CURLOPT_XFERINFODATA, handleInProgress->_rip.get());
-
-  // mop: XXX :S CURLE 51 and 60...
-  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
-  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
-
-  // boost asio socket stuff
-  curl_easy_setopt(handle, CURLOPT_OPENSOCKETFUNCTION, &CommunicatorThread::openSocket);
-  curl_easy_setopt(handle, CURLOPT_OPENSOCKETDATA, this);
-  curl_easy_setopt(handle, CURLOPT_CLOSESOCKETFUNCTION, &CommunicatorThread::closeSocket);
-  curl_easy_setopt(handle, CURLOPT_CLOSESOCKETDATA, this);
+  curl_easy_setopt(handle, CURLOPT_WRITEDATA, handleInProgress->_rip.get());
+  curl_easy_setopt(handle, CURLOPT_HEADERDATA, handleInProgress->_rip.get());
 
   long connectTimeout =
       static_cast<long>(newRequest->_options.connectionTimeout);
@@ -229,7 +211,37 @@ void CommunicatorThread::run() {
   curl_multi_setopt(_curl, CURLMOPT_SOCKETDATA, this);
   curl_multi_setopt(_curl, CURLMOPT_TIMERFUNCTION, &CommunicatorThread::curlTimerCb);
   curl_multi_setopt(_curl, CURLMOPT_TIMERDATA, this);
+
+  _prototypeHandle = createPrototype();
   _ioService->run();
+  curl_easy_cleanup(_prototypeHandle);
+}
+
+CURL* CommunicatorThread::createPrototype() {
+  CURL* handle = curl_easy_init();
+  curl_easy_setopt(handle, CURLOPT_VERBOSE, 0L);
+  curl_easy_setopt(handle, CURLOPT_PROXY, "");
+  
+  // the xfer/progress options are only used to handle request abortions
+  curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
+  curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, CommunicatorThread::readBody);
+
+  curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, CommunicatorThread::readHeaders);
+
+  //curl_easy_setopt(handle, CURLOPT_DEBUGFUNCTION, CommunicatorThread::curlDebug);
+  //curl_easy_setopt(handle, CURLOPT_DEBUGDATA, handleInProgress->_rip.get());
+    // mop: XXX :S CURLE 51 and 60...
+  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
+  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
+
+  // boost asio socket stuff
+  curl_easy_setopt(handle, CURLOPT_OPENSOCKETFUNCTION, &CommunicatorThread::openSocket);
+  curl_easy_setopt(handle, CURLOPT_OPENSOCKETDATA, this);
+  curl_easy_setopt(handle, CURLOPT_CLOSESOCKETFUNCTION, &CommunicatorThread::closeSocket);
+  curl_easy_setopt(handle, CURLOPT_CLOSESOCKETDATA, this);
+  curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, CommunicatorThread::curlProgress);
+  curl_easy_setopt(handle, CURLOPT_PATH_AS_IS, 1L); 
+  return handle;
 }
 
 int CommunicatorThread::sockCb(CURL *e, curl_socket_t s, int what, void *userp, void *sockp) {
