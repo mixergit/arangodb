@@ -53,104 +53,17 @@
 
 #include "Basics/Common.h"
 #include "Basics/Mutex.h"
-#include "Basics/StringBuffer.h"
+
 #include "Rest/GeneralRequest.h"
 #include "Rest/HttpResponse.h"
+#include "SimpleHttpClient/CommunicatorCommon.h"
+#include "SimpleHttpClient/CommunicatorThread.h"
 #include "SimpleHttpClient/Callbacks.h"
 #include "SimpleHttpClient/Destination.h"
 #include "SimpleHttpClient/Options.h"
 
 namespace arangodb {
 namespace communicator {
-
-class CommunicationResult: public Result {
- public:
-  CommunicationResult(int errorNumber, std::unique_ptr<HttpResponse> _response)
-    : Result(errorNumber),
-      response(std::move(response)) {
-
-  }
- private:
-  RequestInProgress* rip;
-  std::unique_ptr<HttpResponse> response;
-}
-
-typedef std::unordered_map<std::string, std::string> HeadersInProgress;
-typedef uint64_t Ticket;
-
-struct RequestInProgress {
-  RequestInProgress(Destination destination, Callbacks callbacks,
-                    Ticket ticketId, std::string const& requestBody,
-                    Options const& options)
-      : _destination(destination),
-        _callbacks(callbacks),
-        _ticketId(ticketId),
-        _requestBody(requestBody),
-        _requestHeaders(nullptr),
-        _startTime(0.0),
-        _responseBody(new basics::StringBuffer(false)),
-        _options(options),
-        _aborted(false) {
-    _errorBuffer[0] = '\0';
-  }
-
-  ~RequestInProgress() {
-    if (_requestHeaders != nullptr) {
-      curl_slist_free_all(_requestHeaders);
-    }
-  }
-
-  RequestInProgress(RequestInProgress const& other) = delete;
-  RequestInProgress& operator=(RequestInProgress const& other) = delete;
-
-  // mop: i think we should just hold the full request here later
-  Destination _destination;
-  Callbacks _callbacks;
-  Ticket _ticketId;
-  std::string _requestBody;
-  struct curl_slist* _requestHeaders;
-
-  HeadersInProgress _responseHeaders;
-  double _startTime;
-  std::unique_ptr<basics::StringBuffer> _responseBody;
-  Options _options;
-
-  char _errorBuffer[CURL_ERROR_SIZE];
-  bool _aborted;
-};
-
-struct CurlHandle {
-  explicit CurlHandle(RequestInProgress* rip) : _handle(nullptr), _rip(rip) {
-    _handle = curl_easy_init();
-    if (_handle == nullptr) {
-      THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
-    }
-    curl_easy_setopt(_handle, CURLOPT_PRIVATE, _rip.get());
-    curl_easy_setopt(_handle, CURLOPT_PATH_AS_IS, 1L); 
-  }
-  ~CurlHandle() {
-    if (_handle != nullptr) {
-      curl_easy_cleanup(_handle);
-    }
-  }
-
-  CurlHandle(CurlHandle& other) = delete;
-  CurlHandle& operator=(CurlHandle& other) = delete;
-
-  CURL* _handle;
-  std::unique_ptr<RequestInProgress> _rip;
-};
-}
-}
-
-namespace arangodb {
-namespace communicator {
-
-#ifdef MAINTAINER_MODE
-const static double CALLBACK_WARN_TIME = 0.01;
-#else
-const static double CALLBACK_WARN_TIME = 0.1;
-#endif
 
 class Communicator {
  public:
@@ -165,75 +78,22 @@ class Communicator {
   void abortRequests();
   void disable() { _enabled = false; };
   void enable()  { _enabled = true; };
-  void work() {
-    _ioService.run();
-  }
   void stop() {
-    _ioService.stop();
+    _ioService->stop();
   }
 
 
  private:
-  struct NewRequest {
-    Destination _destination;
-    std::unique_ptr<GeneralRequest> _request;
-    Callbacks _callbacks;
-    Options _options;
-    Ticket _ticketId;
-  };
-
-  struct CurlData {};
-
- private:
-  Mutex _handlesLock;
-  std::unordered_map<uint64_t, std::unique_ptr<CurlHandle>> _handlesInProgress;
-  
-  CURLM* _curl;
-
   bool _enabled;
-  boost::asio::io_service _ioService;
-  boost::asio::deadline_timer _timer;
+  std::shared_ptr<boost::asio::io_service> _ioService;
   boost::asio::io_service::work _work;
-  std::map<curl_socket_t, boost::asio::ip::tcp::socket *> _socketMap;
+  CommunicatorThread _communicatorThread;
 
  private:
   void abortRequestInternal(Ticket ticketId);
   std::vector<RequestInProgress const*> requestsInProgress();
-  void createRequestInProgress(NewRequest const& newRequest);
-  void handleResult(CURL*, CURLcode);
   void transformResult(CURL*, HeadersInProgress&&,
                        std::unique_ptr<basics::StringBuffer>, HttpResponse*);
-  /// @brief curl will strip standalone ".". ArangoDB allows using . as a key
-  /// so this thing will analyse the url and urlencode any unsafe .'s
-  std::string createSafeDottedCurlUrl(std::string const& originalUrl);
-
-  void callErrorFn(RequestInProgress*, int const&, std::unique_ptr<GeneralResponse>);
-  void callErrorFn(Ticket const&, Destination const&, Callbacks const&, int const&, std::unique_ptr<GeneralResponse>);
-  void callSuccessFn(Ticket const&, Destination const&, Callbacks const&, std::unique_ptr<GeneralResponse>);
-  void addSocket(curl_socket_t s, CURL *easy, int action);
-  void setSocket(int *fdp, curl_socket_t s, CURL *e, int act, int oldact);
-  void removeSocket(int *f);
-  void eventCb(curl_socket_t s,
-               int action, const boost::system::error_code & error,
-               int *fdp);
-  void boostTimerCb(boost::system::error_code const& error);
-  int handleMultiSocket(curl_socket_t s, int const& action);
-
-
- private:
-  static size_t readBody(void*, size_t, size_t, void*);
-  static size_t readHeaders(char* buffer, size_t size, size_t nitems,
-                            void* userdata);
-  static int curlDebug(CURL*, curl_infotype, char*, size_t, void*);
-  static int curlProgress(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
-  static void logHttpHeaders(std::string const&, std::string const&);
-  static void logHttpBody(std::string const&, std::string const&);
-  static curl_socket_t openSocket(void *clientp, curlsocktype purpose, struct curl_sockaddr *address);
-  static int closeSocket(void *clientp, curl_socket_t item);
-  static int sockCb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp);
-  static int curlTimerCb(CURLM *multi, long timeout_ms, void*);
-
-
 };
 }
 }

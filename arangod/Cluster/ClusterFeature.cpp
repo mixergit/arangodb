@@ -141,6 +141,7 @@ void ClusterFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
 }
 
 void ClusterFeature::validateOptions(std::shared_ptr<ProgramOptions> options) {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "WAS MACHT ES";
   if (options->processingResult().touched("cluster.disable-dispatcher-kickstarter") ||
       options->processingResult().touched("cluster.disable-dispatcher-frontend")) {
     LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
@@ -222,6 +223,7 @@ void ClusterFeature::reportRole(arangodb::ServerState::RoleEnum role) {
 }
 
 void ClusterFeature::prepare() {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "CLUSTERFEATURE PREPARE";
   auto v8Dealer = ApplicationServer::getFeature<V8DealerFeature>("V8Dealer");
 
   v8Dealer->defineDouble("SYS_DEFAULT_REPLICATION_FACTOR_SYSTEM",

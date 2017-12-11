@@ -232,6 +232,7 @@ ClusterComm::ClusterComm()
     _jwtAuthorization = "bearer " + auth->jwtToken();
   }
 
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Communicator started";
   _communicator = std::make_shared<communicator::Communicator>();
 }
 
@@ -304,7 +305,7 @@ std::shared_ptr<ClusterComm> ClusterComm::instance() {
 
 void ClusterComm::initialize() {
   auto i = instance();   // this will create the static instance
-  i->startBackgroundThread();
+  //i->startBackgroundThread();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1223,7 +1224,7 @@ std::vector<communicator::Ticket> ClusterComm::activeServerTickets(std::vector<s
 
 void ClusterComm::disable() {
    _communicator->disable();
-   _communicator->abortRequests();
+   //_communicator->abortRequests();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1236,7 +1237,7 @@ void ClusterCommThread::abortRequestsToFailedServers() {
   if (failedServers.size() > 0) {
     auto ticketIds = _cc->activeServerTickets(failedServers);
     for (auto const& ticketId: ticketIds) {
-      _cc->communicator()->abortRequest(ticketId);
+      //_cc->communicator()->abortRequest(ticketId);
     }
   }
 }
@@ -1246,7 +1247,7 @@ void ClusterCommThread::run() {
 
   while (!isStopping()) {
     try {
-      abortRequestsToFailedServers();
+      //abortRequestsToFailedServers();
       //_cc->communicator()->work_once();
       //_cc->communicator()->wait();
       LOG_TOPIC(TRACE, Logger::CLUSTER) << "done waiting in ClusterCommThread";
@@ -1256,7 +1257,7 @@ void ClusterCommThread::run() {
       LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "caught unknown exception in ClusterCommThread";
     }
   }
-  _cc->communicator()->abortRequests();
+  //_cc->communicator()->abortRequests();
   LOG_TOPIC(DEBUG, Logger::CLUSTER) << "waiting for curl to stop remaining handles";
   // while (_cc->communicator()->work_once() > 0) {
   //   usleep(10);
