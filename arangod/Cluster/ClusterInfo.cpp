@@ -1277,9 +1277,7 @@ int ClusterInfo::createCollectionCoordinator(std::string const& databaseName,
     }
   }
 
-  AgencyGeneralTransaction transaction;
-  transaction.transactions.push_back(
-    AgencyGeneralTransaction::TransactionType(opers,precs));
+  AgencyWriteTransaction transaction(opers,precs);
 
   { // we hold this mutex from now on until we have updated our cache
     // using loadPlan, this is necessary for the callback closure to
@@ -1323,10 +1321,12 @@ int ClusterInfo::createCollectionCoordinator(std::string const& databaseName,
           LOG_TOPIC(ERR, Logger::CLUSTER) << "Could not get agency dump!";
         }
       } else {
-        errorMsg += std::string("\n") + __FILE__ + std::to_string(__LINE__);
-        errorMsg += std::string("\n") + res.errorMessage();
-        errorMsg += std::string("\n") + res.errorDetails();
-        errorMsg += std::string("\n") + res.body();
+        errorMsg += std::string("file: ") + __FILE__ + 
+                    " line: " + std::to_string(__LINE__);
+        errorMsg += " HTTP code: " + std::to_string(res.httpCode());
+        errorMsg += " error message: " + res.errorMessage();
+        errorMsg += " error details: " + res.errorDetails();
+        errorMsg += " body: " + res.body();
         events::CreateCollection(
           name, TRI_ERROR_CLUSTER_COULD_NOT_CREATE_COLLECTION_IN_PLAN);
         return TRI_ERROR_CLUSTER_COULD_NOT_CREATE_COLLECTION_IN_PLAN;
@@ -1546,7 +1546,7 @@ int ClusterInfo::dropCollectionCoordinator(
 /// @brief set collection properties in coordinator
 ////////////////////////////////////////////////////////////////////////////////
 
-int ClusterInfo::setCollectionPropertiesCoordinator(
+Result ClusterInfo::setCollectionPropertiesCoordinator(
     std::string const& databaseName, std::string const& collectionID,
     LogicalCollection const* info) {
   AgencyComm ac;
@@ -1560,7 +1560,7 @@ int ClusterInfo::setCollectionPropertiesCoordinator(
   res = ac.getValues("Plan/Collections/" + databaseName + "/" + collectionID);
 
   if (!res.successful()) {
-    return TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND;
+    return Result(TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND);
   }
 
   velocypack::Slice collection = res.slice()[0].get(
@@ -1568,7 +1568,7 @@ int ClusterInfo::setCollectionPropertiesCoordinator(
                                 "Collections", databaseName, collectionID}));
 
   if (!collection.isObject()) {
-    return TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND;
+    return Result(TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND);
   }
 
   VPackBuilder temp;
@@ -1592,19 +1592,17 @@ int ClusterInfo::setCollectionPropertiesCoordinator(
 
   if (res.successful()) {
     loadPlan();
-    return TRI_ERROR_NO_ERROR;
-  } else {
-    return TRI_ERROR_CLUSTER_AGENCY_COMMUNICATION_FAILED;
+    return Result();
   }
 
-  return TRI_ERROR_INTERNAL;
+  return Result(TRI_ERROR_CLUSTER_AGENCY_COMMUNICATION_FAILED, res.errorMessage());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief set collection status in coordinator
 ////////////////////////////////////////////////////////////////////////////////
 
-int ClusterInfo::setCollectionStatusCoordinator(
+Result ClusterInfo::setCollectionStatusCoordinator(
     std::string const& databaseName, std::string const& collectionID,
     TRI_vocbase_col_status_e status) {
   AgencyComm ac;
@@ -1616,7 +1614,7 @@ int ClusterInfo::setCollectionStatusCoordinator(
   res = ac.getValues("Plan/Collections/" + databaseName + "/" + collectionID);
 
   if (!res.successful()) {
-    return TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND;
+    return Result(TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND);
   }
 
   VPackSlice col = res.slice()[0].get(
@@ -1624,7 +1622,7 @@ int ClusterInfo::setCollectionStatusCoordinator(
                                 "Collections", databaseName, collectionID}));
 
   if (!col.isObject()) {
-    return TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND;
+    return Result(TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND);
   }
 
   TRI_vocbase_col_status_e old = static_cast<TRI_vocbase_col_status_e>(
@@ -1633,7 +1631,7 @@ int ClusterInfo::setCollectionStatusCoordinator(
 
   if (old == status) {
     // no status change
-    return TRI_ERROR_NO_ERROR;
+    return Result();
   }
 
   VPackBuilder builder;
@@ -1647,7 +1645,7 @@ int ClusterInfo::setCollectionStatusCoordinator(
     }
     builder.add("status", VPackValue(status));
   } catch (...) {
-    return TRI_ERROR_OUT_OF_MEMORY;
+    return Result(TRI_ERROR_OUT_OF_MEMORY);
   }
   res.clear();
 
@@ -1661,12 +1659,10 @@ int ClusterInfo::setCollectionStatusCoordinator(
 
   if (res.successful()) {
     loadPlan();
-    return TRI_ERROR_NO_ERROR;
-  } else {
-    return TRI_ERROR_CLUSTER_AGENCY_COMMUNICATION_FAILED;
-  }
+    return Result();
+  } 
 
-  return TRI_ERROR_INTERNAL;
+  return Result(TRI_ERROR_CLUSTER_AGENCY_COMMUNICATION_FAILED, res.errorMessage());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2683,7 +2679,7 @@ std::shared_ptr<std::vector<ServerID>> ClusterInfo::getResponsibleServer(
           }
         }
       }
-      usleep(500000);
+      std::this_thread::sleep_for(std::chrono::microseconds(500000));
     }
 
     if (++tries >= 2) {

@@ -350,7 +350,7 @@ void ClusterFeature::prepare() {
         LOG_TOPIC(INFO, arangodb::Logger::CLUSTER) << "Found " << DBServers.size() << " DBservers.";
         break;
       }
-      sleep(1);
+      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
   }
@@ -437,7 +437,7 @@ void ClusterFeature::start() {
 
     while (!_heartbeatThread->isReady()) {
       // wait until heartbeat is ready
-      usleep(10000);
+      std::this_thread::sleep_for(std::chrono::microseconds(10000));
     }
   }
 
@@ -465,7 +465,7 @@ void ClusterFeature::start() {
       break;
     }
 
-    sleep(1);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   ServerState::instance()->setState(ServerState::STATE_SERVING);
@@ -485,7 +485,7 @@ void ClusterFeature::stop() {
     if (_heartbeatThread != nullptr) {
       int counter = 0;
       while (_heartbeatThread->isRunning()) {
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
         // emit warning after 5 seconds
         if (++counter == 10 * 5) {
           LOG_TOPIC(WARN, arangodb::Logger::CLUSTER) << "waiting for heartbeat thread to finish";
@@ -512,7 +512,7 @@ void ClusterFeature::unprepare() {
     if (_heartbeatThread != nullptr) {
       int counter = 0;
       while (_heartbeatThread->isRunning()) {
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
         // emit warning after 5 seconds
         if (++counter == 10 * 5) {
           LOG_TOPIC(WARN, arangodb::Logger::CLUSTER) << "waiting for heartbeat thread to finish";
@@ -555,7 +555,7 @@ void ClusterFeature::unprepare() {
   comm.sendTransactionWithFailover(unreg, 120.0);
 
   while (_heartbeatThread->isRunning()) {
-    usleep(50000);
+    std::this_thread::sleep_for(std::chrono::microseconds(50000));
   }
 
   AgencyCommManager::MANAGER->stop();
