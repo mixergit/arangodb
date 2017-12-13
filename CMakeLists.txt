@@ -1083,3 +1083,11 @@ add_executable(simpletesti
 target_link_libraries(simpletesti
   arangoserver
 )
+
+add_executable(ballern
+  ballern.cpp
+  lib/Basics/WorkMonitorDummy.cpp
+)
+target_link_libraries(ballern
+  arangoserver
+)
