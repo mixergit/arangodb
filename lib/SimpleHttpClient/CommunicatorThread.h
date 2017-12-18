@@ -77,8 +77,8 @@ const static double CALLBACK_WARN_TIME = 0.1;
 typedef std::unordered_map<std::string, std::string> HeadersInProgress;
 
 struct RequestInProgress {
-  RequestInProgress(Destination destination, Callbacks callbacks,
-                    Ticket ticketId, std::string const& requestBody,
+  RequestInProgress(Destination const& destination, Callbacks const& callbacks,
+                    Ticket const& ticketId, std::string const& requestBody,
                     Options const& options)
       : _destination(destination),
         _callbacks(callbacks),
@@ -119,7 +119,8 @@ struct RequestInProgress {
 
 struct CurlHandle {
   explicit CurlHandle(CURL* prototype, RequestInProgress* rip) : _handle(nullptr), _rip(rip) {
-    _handle = curl_easy_duphandle(prototype);
+    _handle = prototype;
+    //_handle = curl_easy_duphandle(prototype);
     if (_handle == nullptr) {
       THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
     }
@@ -127,7 +128,7 @@ struct CurlHandle {
   }
   ~CurlHandle() {
     if (_handle != nullptr) {
-      curl_easy_cleanup(_handle);
+      //curl_easy_cleanup(_handle);
     }
   }
 
@@ -176,7 +177,9 @@ class CommunicatorThread: public Thread {
   };
  
  public:
-  void createRequest(NewRequest* newRequest);
+  void createRequest(Ticket const& id, Destination const& destination,
+                                GeneralRequest* requestPtr,
+                                Callbacks const& callbacks, Options const& options);
   virtual void run() override;
   virtual bool isSystem() override {
     return true;

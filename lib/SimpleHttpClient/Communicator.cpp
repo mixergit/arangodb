@@ -57,16 +57,15 @@ Communicator::~Communicator() {
   ::curl_global_cleanup();
 }
 
-Ticket Communicator::addRequest(Destination destination,
+Ticket Communicator::addRequest(Destination const& destination,
                                 std::unique_ptr<GeneralRequest> request,
-                                Callbacks callbacks, Options options) {
+                                Callbacks const& callbacks, Options const& options) {
   uint64_t id = NEXT_TICKET_ID.fetch_add(1, std::memory_order_seq_cst);
   TRI_ASSERT(request);
   GeneralRequest* requestPtr = request.release();
   
-  NewRequest* newRequest = new NewRequest(destination, requestPtr, callbacks, options, id);
   //std::unique_ptr<NewRequest> newRequest({destination, std::move(request), callbacks, options, id});
-  _ioService->post(std::bind(&CommunicatorThread::createRequest, &_communicatorThread, newRequest));
+  _ioService->post(std::bind(&CommunicatorThread::createRequest, &_communicatorThread, id, destination, requestPtr, callbacks, options));
   
   return Ticket{id};
 }

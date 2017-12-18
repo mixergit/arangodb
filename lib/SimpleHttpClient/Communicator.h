@@ -71,8 +71,7 @@ class Communicator {
   ~Communicator();
 
  public:
-  Ticket addRequest(Destination, std::unique_ptr<GeneralRequest>, Callbacks,
-                    Options);
+  Ticket addRequest(Destination const&, std::unique_ptr<GeneralRequest>, Callbacks const&, Options const&);
 
   void abortRequest(Ticket ticketId);
   void abortRequests();

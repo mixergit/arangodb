@@ -53,18 +53,20 @@
 
 using namespace arangodb::communicator;
 
-void CommunicatorThread::createRequest(NewRequest* newRequestPtr) {
-  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Adding request to " << newRequestPtr->_destination.url();
-  auto newRequest = std::unique_ptr<NewRequest>(newRequestPtr);
-  auto request = (HttpRequest*) newRequest->_request.get();
+void CommunicatorThread::createRequest(Ticket const& id, Destination const& destination,
+                                GeneralRequest* requestPtr,
+                                Callbacks const& callbacks, Options const& options) {
+  LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "Adding request to " << destination.url();
+  auto generalRequest = std::unique_ptr<GeneralRequest>(requestPtr);
+  HttpRequest* request = (HttpRequest*) generalRequest.get();
   TRI_ASSERT(request != nullptr);
 
   // the curl handle will be managed safely via unique_ptr and hold
   // ownership for rip
   auto rip = new RequestInProgress(
-      newRequest->_destination, newRequest->_callbacks, newRequest->_ticketId,
+      destination, callbacks, id,
       std::string(request->body().c_str(), request->body().length()),
-      newRequest->_options);
+      options);
 
   auto handleInProgress = std::make_unique<CurlHandle>(_prototypeHandle, rip);
 
@@ -95,7 +97,7 @@ void CommunicatorThread::createRequest(NewRequest* newRequestPtr) {
     requestHeaders = curl_slist_append(requestHeaders, thisHeader.c_str());
   }
 
-  std::string url = createSafeDottedCurlUrl(newRequest->_destination.url());
+  std::string url = createSafeDottedCurlUrl(destination.url());
   handleInProgress->_rip->_requestHeaders = requestHeaders;
   curl_easy_setopt(handle, CURLOPT_HTTPHEADER, requestHeaders);
   //curl_easy_setopt(handle, CURLOPT_HEADER, 0L);
@@ -109,7 +111,7 @@ void CommunicatorThread::createRequest(NewRequest* newRequestPtr) {
   curl_easy_setopt(handle, CURLOPT_HEADERDATA, handleInProgress->_rip.get());
 
   long connectTimeout =
-      static_cast<long>(newRequest->_options.connectionTimeout);
+      static_cast<long>(options.connectionTimeout);
   // mop: although curl is offering a MS scale connecttimeout this gets ignored
   // in at least 7.50.3
   // in doubt change the timeout to _MS below and hardcode it to 999 and see if
@@ -121,7 +123,7 @@ void CommunicatorThread::createRequest(NewRequest* newRequestPtr) {
 
   curl_easy_setopt(
       handle, CURLOPT_TIMEOUT_MS,
-      static_cast<long>(newRequest->_options.requestTimeout * 1000));
+      static_cast<long>(options.requestTimeout * 1000));
   curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, connectTimeout);
 
   switch (request->requestType()) {
@@ -171,7 +173,7 @@ void CommunicatorThread::createRequest(NewRequest* newRequestPtr) {
  
   { 
     MUTEX_LOCKER(guard, _handlesLock);
-    _handlesInProgress.emplace(newRequest->_ticketId, std::move(handleInProgress));
+    _handlesInProgress.emplace(id, std::move(handleInProgress));
   }
   {
     //MUTEX_LOCKER(guard, _curlLock);
