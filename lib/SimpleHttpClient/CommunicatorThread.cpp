@@ -67,10 +67,10 @@ void CommunicatorThread::createRequest(Ticket const& id, Destination const& dest
       destination, callbacks, id,
       std::string(request->body().c_str(), request->body().length()),
       options);
+  
+  CURL* handle = createPrototype();
+  auto handleInProgress = std::make_unique<CurlHandle>(handle, rip);
 
-  auto handleInProgress = std::make_unique<CurlHandle>(_prototypeHandle, rip);
-
-  CURL* handle = handleInProgress->_handle;
   struct curl_slist* requestHeaders = nullptr;
 
   switch (request->contentType()) {
@@ -214,13 +214,13 @@ void CommunicatorThread::run() {
   curl_multi_setopt(_curl, CURLMOPT_TIMERFUNCTION, &CommunicatorThread::curlTimerCb);
   curl_multi_setopt(_curl, CURLMOPT_TIMERDATA, this);
 
-  _prototypeHandle = createPrototype();
   _ioService->run();
-  curl_easy_cleanup(_prototypeHandle);
 }
 
 CURL* CommunicatorThread::createPrototype() {
   CURL* handle = curl_easy_init();
+  // XXX must be set to 1 for logging
+  // 1 is a performance killer
   curl_easy_setopt(handle, CURLOPT_VERBOSE, 0L);
   curl_easy_setopt(handle, CURLOPT_PROXY, "");
   
